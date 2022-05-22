@@ -4,7 +4,7 @@ Socks-5 Proxy Agent for NodeJS Apps
 Example:
 ```
 const SocksHttpAgent = require('../lib/socks-http-agent'),
-    SocksHttp2Agent = require('../lib/socks-http2-agent'),
+    SocksHttp2Agent = require('../lib/socks-http2-agent');
 
 const agents = {
     http: new SocksHttpAgent({
