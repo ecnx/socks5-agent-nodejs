@@ -61,7 +61,7 @@ function request(context, callback) {
     const port = context.options.endpoint.port;
     context.socket.once('data', function(chunk) {
         const data = Buffer.from(chunk, 'binary');
-        if (data.length >= 4 && data[0] == 5 && data[1] == 0 && data[3] == 1) {
+        if (data.length >= 2 && data[0] == 5 && data[1] == 0) {
             console.log('socks5 request success.');
             callback(null);
         } else {
