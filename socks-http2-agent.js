@@ -110,6 +110,11 @@ SocksProxyH2.prototype.processClient = function(options, callback) {
                 rejectUnauthorized: this.rejectUnauthorized,
                 ALPNProtocols: ['h2'],
             });
+            tlssocket.on('close', () => {
+                run_locked(lock, () => {
+                    callback(new Error('TLS Socket closed'));
+                });
+            });
             tlssocket.once('secureConnect', () => {
                 if (tlssocket.authorized || this.rejectUnauthorized === false) {
                     this.setupConnection(options, tlssocket, lock, callback);
