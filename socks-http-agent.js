@@ -1,263 +1,243 @@
-/* Socks-5 Proxy Agent Library */
+/* Socks Proxy Http Agent */
 
 /* jshint esversion: 6 */
 /* jshint node: true */
 "use strict";
 
 const tls = require('tls'),
-    socks = require('./socks-proxy');
+    socks_proxy = require('./socks-proxy');
 
-module.exports = SocksProxyAgent;
+module.exports = SocksHttpAgent;
 
-function SocksProxyAgent(options, selectProxyEndpoint) {
-    this.sockets = [];
+/* --- Http Agent Creation --- */
 
-    /* Setup keep alive options */
-    this.keepAlive = !!options.keepAlive;
+function SocksHttpAgent(options, selectProxyEndpoint) {
+    this.pool = [];
 
-    /* Reset request count */
-    this.reqcount = 0;
-
-    /* Check proxy endpoint */
-    if (options.hasOwnProperty('proxy') && selectProxyEndpoint) {
-        throw new Error('Dynamic and static endpoint selections are exclusive');
-    }
-
-    /* Setup proxy endpoint */
-    if (options.hasOwnProperty('proxy')) {
-        if (!this.checkProxy(options.proxy)) {
-            throw new Error('Proxy endpoint is invalid');
-        }
+    if (options.proxy) {
         this.proxy = options.proxy;
     } else if (selectProxyEndpoint) {
         this.selectProxyEndpoint = selectProxyEndpoint;
         this.proxy = null;
     } else {
-        throw new Error('Proxy config is invalid');
+        throw new Error('Proxy option is required');
     }
 
-    /* Setup proxy bridge */
-    if (options.hasOwnProperty('bridge')) {
-        if (!this.checkProxy(options.bridge)) {
-            throw new Error('Proxy bridge is invalid');
-        }
-        this.bridge = options.bridge;
-    }
+    this.bridge = options.bridge ? options.bridge : null;
+    this.credentials = options.credentials ? options.credentials : null;
 
-    /* Setup connect timeout */
-    if (options.hasOwnProperty('connectTimeout')) {
-        if (!this.checkPositiveInteger(options.connectTimeout)) {
-            throw new Error('Connect timeout must be a positive integer');
-        }
-        this.connectTimeout = options.connectTimeout;
+    if (isNaN(options.connectTimeout)) {
+        this.connectTimeout = 10000;
     } else {
-        this.connectTimeout = 5000;
+        this.connectTimeout = options.connectTimeout;
     }
 
-    /* Setup socket timeout */
-    if (options.hasOwnProperty('socketTimeout')) {
-        if (!this.checkPositiveInteger(options.socketTimeout)) {
-            throw new Error('Socket timeout must be a positive integer');
-        }
+    if (Number.isInteger(options.socketTimeout) && options.socketTimeout >= 0) {
         this.socketTimeout = options.socketTimeout;
     } else {
-        this.socketTimeout = 30000;
+        this.socketTimeout = 60000;
     }
 
-    /* Setup request limit */
-    if (options.hasOwnProperty('reqlimit')) {
-        if (!selectProxyEndpoint) {
-            throw new Error('Request limit needs dynamic endpoint selection');
-        }
-        if (!this.checkPositiveInteger(options.reqlimit)) {
-            throw new Error('Request limit be a positive integer');
-        }
-        this.reqlimit = options.reqlimit;
+    if (options.rejectUnauthorized === false) {
+        this.rejectUnauthorized = false;
+    } else {
+        this.rejectUnauthorized = true;
     }
+
+    this.keepAlive = !!options.keepAlive;
 }
 
-SocksProxyAgent.prototype.checkPositiveInteger = function(value) {
-    return !isNaN(value) && value > 0 && Math.floor(value) === value;
-};
-
-SocksProxyAgent.prototype.checkPort = function(port) {
-    return this.checkPositiveInteger(port) && port <= 65535;
-};
-
-SocksProxyAgent.prototype.checkProxy = function(proxy) {
-    return proxy.hasOwnProperty('host') && this.checkPort(proxy.port);
-};
-
-SocksProxyAgent.prototype.setupSocket = function(socket, endpoint) {
-    socket.locked = false;
-    socket.revoked = false;
-    socket.endpoint = endpoint;
-    socket.on('close', () => {
-        this.revokeSocket(socket);
-    });
-    socket.on('error', () => {
-        this.revokeSocket(socket);
-    });
-};
-
-SocksProxyAgent.prototype.setupConnection = function(options, socket, callback) {
-    if (options.hasOwnProperty('_defaultAgent') && options._defaultAgent.protocol === 'https:') {
-        const tlssocket = tls.connect({
-            servername: options.host,
-            socket: socket
-        }, () => {
-            callback(null, tlssocket);
-        }).on('error', (e) => {
-            callback(e);
-        });
-    } else {
-        callback(null, socket);
+SocksHttpAgent.prototype.createClient = function(options, callback) {
+    if (!options.endpoint) {
+        callback(new Error('Endpoint option is required'));
+        return;
     }
-};
+    if (typeof options.endpoint.host !== 'string' ||
+        !Number.isInteger(options.endpoint.port)) {
+        callback(new Error('Endpoint option is invalid'));
+        return;
+    }
 
-SocksProxyAgent.prototype.createConnection = function(options, callback) {
     if (this.proxy === null) {
         this.selectProxyEndpoint((err, proxy) => {
             if (err) {
                 callback(err);
             } else {
                 this.proxy = proxy;
-                this.openConnection(options, callback);
+                this.createClientNext(options, callback);
             }
         });
     } else {
-        this.openConnection(options, callback);
+        this.createClientNext(options, callback);
     }
 };
 
-SocksProxyAgent.prototype.openConnection = function(options, callback) {
-    const socksopt = {
+/* --- Http2 Agent Clients Creation --- */
+
+SocksHttpAgent.prototype.createClientNext = function(options, callback) {
+    const client = {
+        done: false,
+        ready: false,
+        inuse: false,
+        protocol: options.protocol,
+        endpoint: options.endpoint,
+        tlssocket: null,
+        netsocket: null
+    };
+    this.setupClient(client, (err, session) => {
+        const endflag = !client.done;
+        client.done = true;
+        if (err) {
+            this.destroyClient(client);
+        }
+        if (endflag) {
+            callback(err, session);
+        }
+    });
+};
+
+SocksHttpAgent.prototype.setupClient = function(client, callback) {
+    socks_proxy.connect({
+        proxy: this.proxy,
+        endpoint: client.endpoint,
+        timeout: this.connectTimeout,
+        bridge: this.bridge,
+        credentials: this.credentials
+    }, (err, socket, timedout) => {
+        if (err) {
+            if (timedout && this.selectProxyEndpoint) {
+                this.proxy = null;
+            }
+            callback(err);
+        } else {
+            client.netsocket = socket;
+            client.netsocket.on('error', (err) => {
+                callback(err);
+            }).on('close', () => {
+                callback(new Error('Socket closed'));
+            }).on('timeout', () => {
+                callback(new Error('Socket timed out'));
+            });
+            if (client.protocol === 'https') {
+                client.tlssocket = tls.connect({
+                    servername: client.endpoint.host,
+                    socket: client.netsocket
+                });
+                client.tlssocket.on('error', (err) => {
+                    callback(err);
+                }).on('close', () => {
+                    callback(new Error('TLS Socket closed'));
+                }).on('timeout', () => {
+                    callback(new Error('TLS Socket timed out'));
+                }).once('secureConnect', () => {
+                    if (client.tlssocket.authorized || this.rejectUnauthorized === false) {
+                        client.socket = client.tlssocket;
+                        client.ready = true;
+                        callback(null, client);
+                    } else {
+                        callback(new Error('TLS Socket unauthorized'));
+                    }
+                });
+            } else {
+                client.socket = client.netsocket;
+                client.ready = true;
+                callback(null, client);
+            }
+        }
+    });
+};
+
+/* --- Http Requests Handling --- */
+
+SocksHttpAgent.prototype.addRequest = function(request, options) {
+    if (typeof options.host !== 'string') {
+        request.emit('error', new Error('Host option is required'));
+        return;
+    }
+    if (!Number.isInteger(options.port)) {
+        request.emit('error', new Error('Port option is required'));
+        return;
+    }
+
+    request.shouldKeepAlive = this.keepAlive;
+
+    const newoptions = {
         endpoint: {
             host: options.host,
             port: options.port
         },
-        proxy: this.proxy,
-        ontimeout: () => {
-            this.resetProxy();
-        }
+        protocol: 'http'
     };
-    if (this.hasOwnProperty('connectTimeout')) {
-        socksopt.timeout = this.connectTimeout;
+
+    if (options._defaultAgent) {
+        if (options._defaultAgent.protocol === 'https:') {
+            newoptions.protocol = 'https';
+        }
     }
-    if (this.hasOwnProperty('bridge')) {
-        socksopt.bridge = this.bridge;
+
+    for (let i = 0; i < this.pool.length; i++) {
+        const client = this.pool[i];
+        if (client.ready && !client.inuse &&
+            client.protocol === newoptions.protocol &&
+            client.endpoint.host === newoptions.endpoint.host &&
+            client.endpoint.port === newoptions.endpoint.port) {
+
+            this.performRequest(client, request);
+            return;
+        }
     }
-    socks.connect(socksopt, (err, socket) => {
+
+    this.createClient(newoptions, (err, client) => {
         if (err) {
-            callback(err);
+            request.emit('error', err);
         } else {
-            this.finalizeConnection(socket, options, callback);
+            this.pool.push(client);
+            this.performRequest(client, request);
         }
     });
 };
 
-SocksProxyAgent.prototype.finalizeConnection = function(socket, options, callback) {
-    this.setupConnection(options, socket, (err, socket) => {
-        if (err) {
-            callback(err);
-        } else {
-            this.setupSocket(socket, {
-                host: options.host,
-                port: options.port
-            });
-            this.sockets.push(socket);
-            callback(null, socket);
-        }
-    });
-};
-
-SocksProxyAgent.prototype.reuseSocket = function(socket, request) {
-    socket.locked = true;
-};
-
-SocksProxyAgent.prototype.findFreeSocket = function(endpoint) {
-    for (let i = 0; i < this.sockets.length; i++) {
-        const socket = this.sockets[i];
-        if (socket.revoked === false &&
-            socket.locked === false &&
-            socket.endpoint.host === endpoint.host &&
-            socket.endpoint.port === endpoint.port) {
-            return socket;
-        }
-    }
-    return null;
-};
-
-SocksProxyAgent.prototype.runRequest = function(socket, request) {
-    socket.request = request;
-    socket.setTimeout(this.socketTimeout);
+SocksHttpAgent.prototype.performRequest = function(client, request) {
+    client.inuse = true;
+    client.socket.setTimeout(this.socketTimeout);
     request.prependListener('response', (response) => {
         response.prependListener('end', () => {
-            socket.setTimeout(0);
-            socket.request = null;
-            socket.locked = false;
-            socket.unref();
+            client.socket.setTimeout(0);
+            client.socket.unref();
+            client.inuse = false;
         });
         response.on('error', () => {
-            this.revokeSocket(socket);
+            this.destroyClient(client);
         });
     });
     request.on('error', () => {
-        this.revokeSocket(socket);
+        this.destroyClient(client);
     });
-    socket.ref();
-    request.onSocket(socket);
+    client.socket.ref();
+    request.onSocket(client.socket);
 };
 
-SocksProxyAgent.prototype.addRequest = function(request, options) {
-    if (this.hasOwnProperty('reqlimit')) {
-        console.log('request limit: ' + this.reqcount + ' / ' + this.reqlimit);
-        if (this.reqcount >= this.reqlimit) {
-            this.destroy();
+/* --- Http Agent Cleanup --- */
+
+SocksHttpAgent.prototype.destroyClient = function(client) {
+    client.ready = false;
+    if (client.tlssocket) {
+        try {
+            client.tlssocket.destroy();
+        } catch (unused) {}
+    }
+    if (client.netsocket) {
+        try {
+            client.netsocket.destroy();
+        } catch (unused) {}
+    }
+};
+
+SocksHttpAgent.prototype.destroy = function() {
+    for (let i = 0; i < this.pool.length; i++) {
+        const client = this.pool[i];
+        if (client.ready) {
+            this.destroyClient(client);
         }
-    }
-    request.shouldKeepAlive = this.keepAlive;
-    const socket = this.findFreeSocket({
-        host: options.host,
-        port: options.port
-    });
-    if (socket === null) {
-        this.createConnection(options, (err, newsocket) => {
-            if (err) {
-                request.emit('error', err);
-            } else {
-                newsocket.locked = true;
-                this.runRequest(newsocket, request);
-            }
-        });
-    } else {
-        this.reuseSocket(socket, request);
-        this.runRequest(socket, request);
-    }
-};
-
-SocksProxyAgent.prototype.resetProxy = function() {
-    if (this.hasOwnProperty('selectProxyEndpoint')) {
-        this.reqcount = 0;
-        this.proxy = null;
-    }
-};
-
-SocksProxyAgent.prototype.destroy = function(request, options) {
-    this.reqcount = 0;
-    this.resetProxy();
-    for (let i = 0; i < this.sockets.length; i++) {
-        this.revokeSocket(this.sockets[i]);
-    }
-    this.sockets = [];
-};
-
-SocksProxyAgent.prototype.revokeSocket = function(socket) {
-    if (socket.revoked !== true) {
-        socket.revoked = true;
-        if (socket.request !== null) {
-            socket.request.emit('error', new Error('socket closed'));
-        }
-        socket.destroy();
     }
 };
