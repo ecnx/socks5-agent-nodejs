@@ -69,6 +69,7 @@ function proxy_finish(context, callback) {
         context.socket.removeAllListeners('close');
         context.socket.removeAllListeners('timeout');
         context.socket.setTimeout(0);
+        console.log('proxy connect successful.');
         callback(null, context.socket);
     }
 }
