@@ -176,7 +176,7 @@ function connect_internal(context, callback) {
             });
         });
     } else {
-        console.log('connecting proxy direct...');
+        console.log('connecting proxy directly...');
         connect_socket(context, context.options.proxy, callback, () => {
             connect_next(context, callback);
         });
