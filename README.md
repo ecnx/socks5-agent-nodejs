@@ -13,7 +13,8 @@ const agents = {
             port: 1234
         },
         connectTimeout: 5000,
-        socketTimeout: 60000
+        socketTimeout: 60000,
+        keepAlive: true
     })
     http2: new SocksHttp2Agent({
         proxy: {
